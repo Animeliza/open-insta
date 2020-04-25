@@ -57,19 +57,19 @@ class Client extends EventEmitter {
             */
             await page.goto(InstagramURL);
 
-        	/**
-	        * Processing login steps,
-	        * (1) - Open login form and wait fields load
-	        * (2) - Fill userInformation
-	        * (3) - Click Login Button
-	        * (4) - Wait page navigation load
-	        */
-        	await page.waitForSelector(Selectors.USERNAME, { timeout: 6000 });
-		    await page.focus(Selectors.USERNAME);
-			await page.keyboard.type(this.options.credentials.username);
-			await page.focus(Selectors.PASSWORD);
-			await page.keyboard.type(this.options.credentials.password);
-			await page.click(Selectors.SUBMIT_LOGIN);
+            /**
+            * Processing login steps,
+            * (1) - Open login form and wait fields load
+            * (2) - Fill userInformation
+            * (3) - Click Login Button
+            * (4) - Wait page navigation load
+            */
+            await page.waitForSelector(Selectors.USERNAME, { timeout: 6000 });
+            await page.focus(Selectors.USERNAME);
+            await page.keyboard.type(this.options.credentials.username);
+            await page.focus(Selectors.PASSWORD);
+            await page.keyboard.type(this.options.credentials.password);
+            await page.click(Selectors.SUBMIT_LOGIN);
             
             /**
             * bypassing 2Factor autentication using aconecpt of another lib
@@ -81,7 +81,7 @@ class Client extends EventEmitter {
                 await page.click(Selectors.BUTTON_BYPASS);
                 this.emit(Events.AUTHENTICATION_2FA);
                 var token2FA = await new Promise((resolve, reject) => {
-                    that.on(Events.AUTHENTICATION_ANSWER, resolve);
+                    that.on('2fa_answer', resolve);
                 });
                 await page.focus(Selectors.SECURITY_CODE);
                 await page.keyboard.type(token2FA);
@@ -174,7 +174,7 @@ class Client extends EventEmitter {
         */
         await page.evaluate(ExposeStore, igRaid.toString());
 
-		/**
+        /**
         * Register eventEmitter for Event
         * @event Client#onAddMessageEvent
         * @param {object} message object guided by constructor message.
@@ -190,18 +190,38 @@ class Client extends EventEmitter {
             */
             msg.data.forEach(function(dataItem){
 
-                const message = {
-                    thread_id: msg.thread_id,
-                    mutation_token: ( msg.mutation_token ? msg.mutation_token : null ),
-                    body: new Message(self, dataItem).body,
-                    user: new User(self, msg.user)
-                };
+                if(msg.thread.is_group){
 
-                if(message.body.op == 'add'){
-                    self.emit(Events.MESSAGE_RECEIVED, message);
+                    const message = {
+                        type: msg.type,
+                        fromMe: msg.fromMe,
+                        thread_id: msg.thread.thread_id,
+                        group: msg.thread,
+                        body: new Message(self, dataItem).body,
+                        users: msg.thread.users
+                    };
+
+                    self.emit(Events.MESSAGE_GROUP, message);
+
                 } else {
-                    self.emit(Events.MESSAGE_REVOKED_EVERYONE, message);
+
+                    const message = {
+                        type: msg.type,
+                        fromMe: msg.fromMe,
+                        thread_id: msg.thread.thread_id,
+                        body: new Message(self, dataItem).body,
+                        user: new User(self, msg.thread.users[0])
+                    };
+
+                    if(message.body.op == 'add'){
+                        self.emit(Events.MESSAGE_RECEIVED, message);
+                    } else {
+                        self.emit(Events.MESSAGE_REVOKED_EVERYONE, message);
+                    }
+
                 }
+
+                
 
             });
 
@@ -210,7 +230,7 @@ class Client extends EventEmitter {
         /**
         * Exposing functions and connecting to eventEmitter
         */
-		await page.evaluate(() => {
+        await page.evaluate(() => {
            window.openInsta.messageSync( window.onAddMessageEvent );
         });
 
@@ -226,7 +246,7 @@ class Client extends EventEmitter {
             });
         }
 
-	};
+    };
 
      /**
      * Closes the client
@@ -264,6 +284,22 @@ class Client extends EventEmitter {
             msg = await window.openInsta.sendTextMessage(thread_id, message, options);
             return msg
         }, thread_id, message, options);
+        return newMessage;
+    };
+
+    /**
+     * Send an image on DM
+     * @param {string} thread_id
+     * @param {string|MessageMedia|Location} content
+     * @param {object} options 
+     * @returns {Promise<Message>} Message that was just sent
+     */
+    async sendImage(thread_id, base64Image, width, height, options = {}) {
+        const newMessage = await this.pupPage.evaluate(async (thread_id, base64Image, width, height, options) => {
+            let msg;
+            msg = await window.openInsta.sendImage(thread_id, base64Image, width, height, options);
+            return msg
+        }, thread_id, base64Image, width, height, options);
         return newMessage;
     };
 

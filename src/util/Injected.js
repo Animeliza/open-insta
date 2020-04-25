@@ -34,7 +34,7 @@ exports.ExposeStore = (igRaidStr) => {
     window.openInsta.getLinkRegex = function() {
         return new RegExp("(?:(?:(?:[a-z]+:)?//)?|www\\.)(?:\\S+(?::\\S*)?@)?(?:localhost|(?:(?:[a-z\\u00a1-\\uffff0-9]-*)*[a-z\\u00a1-\\uffff0-9]+)(?:\\.(?:[a-z\\u00a1-\\uffff0-9]-*)*[a-z\\u00a1-\\uffff0-9]+)*(?:\\.(?:((?:[a-z\\u00a1-\\uffff]{2,}))))\\.?)(?::\\d{2,5})?(?:[/?#][^\\s\"]*)?",'ig');
     }
-    window.openInsta.createBlob = function(dataURL) {
+    window.openInsta.makeBlob = function(dataURL) {
         const BASE64_MARKER = ';base64,';
         const parts = dataURL.split(BASE64_MARKER);
         const contentType = parts[0].split(':')[1];
@@ -47,6 +47,29 @@ exports.ExposeStore = (igRaidStr) => {
         return new Blob([uInt8Array], { type: contentType });
     };
 
+    const typeEvents = [
+        {
+            regex: /^\/direct_v2\/threads\/(.+)\/participants\/(.+)\/has_seen$/,
+            type: 'has_seen'
+        }, 
+        {
+            regex: /^\/direct_v2\/threads\/(.+)\/activity_indicator_id\/(.+)$/,
+            type: 'typingActivity'
+        },
+        {
+            regex: /^\/direct_v2\/threads\/(.+)\/items\/(.+)$/,
+            type: 'message'
+        },
+        {
+            regex: /^\/direct_v2\/inbox\/threads\/(.+)$/,
+            type: 'threadsEvents'
+        },
+        {
+            regex: /^\/direct_v2\/inbox\/unseen_count$/,
+            type: 'unseen_count'
+        }
+    ];
+
     /*
     * Function Mapper base on igRaid
     */
@@ -57,12 +80,14 @@ exports.ExposeStore = (igRaidStr) => {
     window.openInsta.thread = window.iR.findModule('ThreadItemType')[0];
     window.openInsta.translator = window.iR.findModule('INBOX_STRING')[0];
     window.openInsta.senders = window.iR.findModule((module) => typeof module.sendLinkMessage === 'function' && typeof module.sendTextMessage === 'function' )[0];
-    // Discover how to take this modules by another way
+    window.openInsta.getters = window.iR.findModule((module) => typeof module.getDirectThreadById === 'function' && typeof module.getDirectUserById === 'function' )[0];
+    // Discover how to take that module by another way
     window.openInsta.magicBox = __r(9699424); 
     window.openInsta.me = __r(9699336).getViewerId();
+    
     // [9699424] //MAGIC BOX
     // __r(9699424).disableTwoFactorAuth().then(data=>console.log(data))
-    // __r(9568331).post('/accounts/phone_confirm_send_sms_code/', {phone_number: "PHONENUMBER"}).then(data=>console.log(data));
+    // __r(9568331).post('/accounts/phone_confirm_send_sms_code/', {phone_number: "5527997075154"}).then(data=>console.log(data));
 
     /*
     * Prepare api address controller to became easy on updates
@@ -83,21 +108,35 @@ exports.ExposeStore = (igRaidStr) => {
         return response;
     };
 
+    openInsta.getThread = async function(search){
+        var response = await openInsta.Direct.getInbox().then(function(data){
+            return data.inbox.threads.find(function(thread){
+                return thread.thread_id == search;
+            });
+        });
+        return response;
+    };
+
     /*
     * Message Sync processor (observer) to fire events on newMessages received
     */
     openInsta.messageSync = function (callback) {
         openInsta.observers.subscribe('/ig_message_sync', async data => {
-            let c;
+            let c, internal, preThread;
             try {
                 c = JSON.parse(data);
                 if(c[0]){
                     if(c[0].data[0]){
                         if(c[0].data[0].path){
-                            if(c[0].data[0].path.includes('/direct_v2/threads/')){
-                                c[0].thread_id = c[0].data[0].path.split("/")[3];
-                                c[0].user = await openInsta.getUserByThread(c[0].thread_id);
-                            }
+                            internal = JSON.parse(c[0].data[0].value);
+                            c[0].fromMe = (internal.user_id == openInsta.me ? true : false);
+                            preThread = await openInsta.Direct.getThread(c[0].data[0].path.split("/")[3]);
+                            c[0].thread =  preThread.thread;
+                            for (var i = typeEvents.length - 1; i >= 0; i--) {
+                                if(typeEvents[i].regex.test(c[0].data[0].path)){
+                                    c[0].type = typeEvents[i].type;
+                                }
+                            }  
                         }
                     }
                 }
@@ -185,12 +224,15 @@ exports.ExposeStore = (igRaidStr) => {
     * @param {object} [options] - Expansion or replace object for futher implementations
     */
     openInsta.sendTextMessage = async (thread_id, text, options = {}) => {
-        const linkBuilder = text.match(openInsta.getLinkRegex());
+        let linkBuilder = text.match(openInsta.getLinkRegex());
+        let mutationToken = openInsta.genToken();
         if(linkBuilder){
-            var dispatch = await openInsta.senders.sendLinkMessage(thread_id,text,linkBuilder,openInsta.genToken());
+            var dispatch = await openInsta.senders.sendLinkMessage(thread_id,text,linkBuilder,mutationToken);
+            dispatch.mutation_token = mutationToken;
             return dispatch;
         } else {
-            var dispatch = await openInsta.senders.sendTextMessage(thread_id,text);
+            var dispatch = await openInsta.senders.sendTextMessage(thread_id,text,mutationToken);
+            dispatch.mutation_token = mutationToken;
             return dispatch;
         }
     };
@@ -201,18 +243,9 @@ exports.ExposeStore = (igRaidStr) => {
     * @param {object} [options] - Expansion or replace object for futher implementations
     */
     openInsta.sendLike = async (thread_id, options = {}) => {
-        var dispatch = {
-            action: 'send_item',
-            mutation_token: openInsta.genToken(),
-            item_type: "like",
-            thread_id: thread_id,
-            ...options
-        };
-        var response = await Broker.$DirectMQTT14(dispatch);
-        return {
-            dispatch: dispatch,
-            sended: response
-        };
+        let mutationToken = openInsta.genToken();
+        var dispatch = await openInsta.senders.sendLike(thread_id,mutationToken);
+        return dispatch;
     };
 
     /*
@@ -236,16 +269,16 @@ exports.ExposeStore = (igRaidStr) => {
         var now = Date.now().toString();
         openInsta.magicBox.uploadPhoto({
             entityName: 'direct_'+now,
-            file: openInsta.createBlob(base64Image),
+            file: openInsta.makeBlob(base64Image),
             uploadId: now,
             uploadMediaHeight: height,
             uploadMediaWidth: width
         }).then((uploadedData) => {
             openInsta.Direct.configurePhoto(openInsta.genToken(),thread_id,uploadedData['upload_id']);
         }).then((postSended) => {
-           console.log("Picture sended",postSended);
+           console.log("Foto enviada",postSended);
         }).catch(err => {
-           console.log("error on send",err);
+           console.log("error ao enviar foto",err);
         });
     };
 
